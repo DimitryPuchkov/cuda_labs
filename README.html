@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>cuda&lowbar;lab1</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <h1 id="cuda_lab1">cuda_lab1</h1>
+<h2 id="задание">Задание</h2>
+<p>Реализовать программу для накладывания фильтров на изображения. Возможные фильтры: размытие, выделение границ, избавление от шума. Изменить время
+Для работы с графическими файлами рекомендуется использовать libpng (man libpng). Примеры использования библиотеки в /usr/share/doc/libpng12-dev/examples/
+Считать изображение из файла, преобразовать в массив, отправить на CUDA Device, провести на устройстве обработку фильтром, вернуть изображение в память хоста, преобразовать в картинку, сохранить файл.</p>
+<h2 id="характеристики-устройства">Характеристики устройства</h2>
+<pre><code>Имя устройства: NVIDIA GeForce RTX 3090 Ti
+Количество мультипроцессоров: 84
+Объем глобальной памяти: 25756696576 байт
+Максимальное количество потоков на блок: 1024
+Максимальный размер сетки: 2147483647 x 65535 x 65535
+Максимальный размер блока: 1024 x 1024 x 64
+</code></pre>
+<h2 id="описание-программы">Описание программы</h2>
+<p>Для считывания и записи изображения использовал библиотеку stb_image, так как ее настройка оказалась наиболее легкой (просто скопировать файлы .h в папку с программой). Реализовал программу только для 3 канальных изображений (RGB).
+Размер блока выбрал 16х16 (256 потоков) так как такое число не очень большое (доступно на большинстве видеокарт) и делится на 32 - число одновременно обрабатывающихся потоков.</p>
+<h3 id="основная-идея">Основная идея:</h3>
+<p>Обработка изображения представляет собой применение свертки с ядром 3х3, следовательно для обработки каждого пикселя необхолдима информация из текущего пикселя а также соседних пикселей (halo) вокруг текущего (всего информация из 9 пикселей считая текущий) а также ядро светрки. Каждый из потоков обрабатывает свой пиксель (так как сетка содиржит в общем случае больше потоков чем пикселей в изображении, то не все потоки будут выполнять работу). По условию задания необходимо использовать общую память, она доступна всем потокам в блоке, и так как необходима информация о соседних пикселях размер общей памяти вычисляется как размеры блока по x и по y увеличенные на 2: по одному пикселю с каждой стороны и умноженные на число каналов изображения (3). В ядрах происходит вначале заполнение shared memory а затем после барьерной функции (чтобы дождаться когда вся общая память будет заполнена) происходит применение свертки.
+Также по условию задания производится замер времени: общего, передачи данных на устройство, выполнения ядра, передачи памяти на хост.</p>
+<h3 id="общий-план-работы-программы">Общий план работы программы:</h3>
+<ol>
+<li>Считывание изображения</li>
+<li>Инициализация памяти на устрйстве и передача данных на устройство</li>
+<li>Обработка изображения:
+3.1 Заполнение общей памяти
+3.2 Применение свертки</li>
+<li>Передача обработанного изображения на хост</li>
+<li>Сохранение изображения</li>
+</ol>
+<h3 id="реализованные-фильтры">Реализованные фильтры:</h3>
+<ul>
+<li>Blur - равномерный фильтр размытия</li>
+<li>Sobel - фильтр собеля для выделения границ</li>
+</ul>
+<h2 id="результат-выполнения-программы">Результат выполнения программы</h2>
+<p>Программу запускал на 2 изображениях: большом (5824х3264) и маленьком (196х257).</p>
+<h3 id="результаты-на-маленьком-изображении">Результаты на маленьком изображении</h3>
+<p><strong>Blur</strong>
+Параметр                   Время (ms)
+Передача данных на GPU     4.2528e-02
+Обработка                  1.9779e-01
+Передача данных на хост    6.1664e-02
+Общее вермя                 1.6367e+02</p>
+<h2 id="вывод">Вывод</h2>
+<ul>
+<li>Функции <code>sinf</code> и <code>__sinf</code> работают с типом float и в случае передачи double делают каст во float поэтому что на типе float что на типе double ошибка прмерно в 7-9 знаке, а функция sin работает с типом double, а в случае передачи float конвертирует его в double поэтому при рассчетах с помощью этой функции и типа double достигается наименьшая ошибка в 18 знаке.</li>
+<li>Функция sin оказалась наиболее быстрой (на обоих типах данных наименьшее время), хотя теоретически sin должен быть самым долгим, sinf побыстрее, а __sinf самым быстрым. Полагаю такой результат был получен в связи с применяемыми оптимизациями (запускал в visual studio) такими как кеширование результатов в sin (для sinf и __sinf нет такого по умолчанию). Была гипотеза что это происходит из-за явного приведения типов, однако запуск без явного приведения с float и с double не выдал качественно другого результата. Однако в реальных задачах когда нет возможности кешировать результат лучше всего будет использовать __sinf как самую быструю функцию.</li>
+</ul>
+
+            
+            
+        </body>
+        </html>

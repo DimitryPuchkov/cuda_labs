@@ -1,148 +1,299 @@
 ﻿#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#include <math.h>
-#include <math_functions.h> 
-#define N 1000000000
-#define PI 3.14159265358979323846f
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <chrono>
 #include <iostream>
-#include <string>
-#include <iomanip>
-using namespace std;
 
-#define dtype float
+// Use stb for image IO
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image.h"
+#include "stb_image_write.h"
 
-__global__ void init_arr_sin(dtype* arr, int n) {
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        arr[i] = sin((i % 360) * PI / (dtype)180.0);
+const int CHANNELS = 3;
+// Simple helper to clamp coordinates
+__device__ __host__ inline int clamp(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
+
+// helper: load center + halo into shared memory
+__device__ __forceinline__ void load_shared_for_tile(const unsigned char*  in, unsigned char*  sdata,
+                                                     int width, int height,
+                                                     int tx, int ty, int bx, int by, int sWidth, int sHeight)
+{
+    int x = bx + tx;
+    int y = by + ty;
+
+    // center
+    for (int c = 0; c < CHANNELS; ++c) {
+        int s_x = tx + 1;
+        int s_y = ty + 1;
+        int sIdx = (s_y * sWidth + s_x) * CHANNELS + c;
+        int imgX = clamp(x, 0, width - 1);
+        int imgY = clamp(y, 0, height - 1);
+        if (x < width && y < height) sdata[sIdx] = in[(imgY * width + imgX) * CHANNELS + c];
+        else sdata[sIdx] = 0;
+    }
+
+    // left halo
+    if (tx == 0) {
+        int lx = bx + tx - 1; int loadX = clamp(lx, 0, width - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = ((ty + 1) * sWidth + 0) * CHANNELS + c;
+            int imgY = clamp(y, 0, height - 1);
+            if (y < height) sdata[sIdx] = in[(imgY * width + loadX) * CHANNELS + c]; else sdata[sIdx] = 0;
+        }
+    }
+    // right halo
+    if (tx == blockDim.x - 1) {
+        int rx = bx + tx + 1; int loadX = clamp(rx, 0, width - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = ((ty + 1) * sWidth + (sWidth - 1)) * CHANNELS + c;
+            int imgY = clamp(y, 0, height - 1);
+            if (y < height) sdata[sIdx] = in[(imgY * width + loadX) * CHANNELS + c]; else sdata[sIdx] = 0;
+        }
+    }
+    // top halo
+    if (ty == 0) {
+        int uy = by + ty - 1; int loadY = clamp(uy, 0, height - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = (0 * sWidth + (tx + 1)) * CHANNELS + c;
+            int imgX = clamp(x, 0, width - 1);
+            if (x < width) sdata[sIdx] = in[(loadY * width + imgX) * CHANNELS + c]; else sdata[sIdx] = 0;
+        }
+    }
+    // bottom halo
+    if (ty == blockDim.y - 1) {
+        int dy = by + ty + 1; int loadY = clamp(dy, 0, height - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = ((sHeight - 1) * sWidth + (tx + 1)) * CHANNELS + c;
+            int imgX = clamp(x, 0, width - 1);
+            if (x < width) sdata[sIdx] = in[(loadY * width + imgX) * CHANNELS + c]; else sdata[sIdx] = 0;
+        }
+    }
+
+    // corners
+    if (tx == 0 && ty == 0) {
+        int cx = bx + tx - 1; int cy = by + ty - 1;
+        int lx = clamp(cx, 0, width - 1); int ly = clamp(cy, 0, height - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = (0 * sWidth + 0) * CHANNELS + c;
+            sdata[sIdx] = in[(ly * width + lx) * CHANNELS + c];
+        }
+    }
+    if (tx == 0 && ty == blockDim.y - 1) {
+        int cx = bx + tx - 1; int cy = by + ty + 1;
+        int lx = clamp(cx, 0, width - 1); int ly = clamp(cy, 0, height - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = ((sHeight - 1) * sWidth + 0) * CHANNELS + c;
+            sdata[sIdx] = in[(ly * width + lx) * CHANNELS + c];
+        }
+    }
+    if (tx == blockDim.x - 1 && ty == 0) {
+        int cx = bx + tx + 1; int cy = by + ty - 1;
+        int lx = clamp(cx, 0, width - 1); int ly = clamp(cy, 0, height - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = (0 * sWidth + (sWidth - 1)) * CHANNELS + c;
+            sdata[sIdx] = in[(ly * width + lx) * CHANNELS + c];
+        }
+    }
+    if (tx == blockDim.x - 1 && ty == blockDim.y - 1) {
+        int cx = bx + tx + 1; int cy = by + ty + 1;
+        int lx = clamp(cx, 0, width - 1); int ly = clamp(cy, 0, height - 1);
+        for (int c = 0; c < CHANNELS; ++c) {
+            int sIdx = ((sHeight - 1) * sWidth + (sWidth - 1)) * CHANNELS + c;
+            sdata[sIdx] = in[(ly * width + lx) * CHANNELS + c];
+        }
     }
 }
 
-__global__ void init_arr_sinf(dtype* arr, int n) {
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        arr[i] = sinf((i % 360) * PI / (dtype)180.0);
+// Shared-memory 3x3 processing kernel (modified to use helper)
+
+__global__ void blur_shared_kernel(const unsigned char*  in, unsigned char*  out, int width, int height)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x * blockDim.x;
+    int by = blockIdx.y * blockDim.y;
+
+    int x = bx + tx;
+    int y = by + ty;
+
+    extern __shared__ unsigned char sdata[]; // (blockDim.x+2)*(blockDim.y+2)*CHANNELS
+    int sWidth = blockDim.x + 2;
+    int sHeight = blockDim.y + 2;
+
+    // fill shared tile (center + halo)
+    load_shared_for_tile(in, sdata, width, height, tx, ty, bx, by, sWidth, sHeight);
+
+    __syncthreads();
+
+    if (x >= width || y >= height) return;
+    float kernel[3][3] = {
+        {1 / 16.0f, 2 / 16.0f, 1 / 16.0f},
+        {2 / 16.0f, 4 / 16.0f, 2 / 16.0f},
+        {1 / 16.0f, 2 / 16.0f, 1 / 16.0f}
+    };
+
+    for (int c = 0; c < CHANNELS; ++c) {
+        float sum = 0.0f;
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                int s_x = (tx + 1) + ox;
+                int s_y = (ty + 1) + oy;
+                unsigned char value = sdata[(s_y * sWidth + s_x) * CHANNELS + c];
+                sum += kernel[oy + 1][ox + 1] * (float)value;
+            }
+        }
+        int result_value = (int)(sum + 0.5f);
+        if (result_value < 0) result_value = 0; else if (result_value > 255) result_value = 255;
+        out[(y * width + x) * CHANNELS + c] = (unsigned char)result_value;
     }
 }
 
-__global__ void init_arr_cuda__sinf(dtype* arr, int n) {
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        arr[i] = __sinf((i % 360) * PI / (dtype)180.0);
+// Shared Sobel
+__global__ void sobel_shared_kernel(const unsigned char*  in, unsigned char*  out, int width, int height)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x * blockDim.x;
+    int by = blockIdx.y * blockDim.y;
+
+    int x = bx + tx;
+    int y = by + ty;
+
+    extern __shared__ unsigned char sdata[]; // (blockDim.x+2)*(blockDim.y+2)*CHANNELS
+    int sWidth = blockDim.x + 2;
+    int sHeight = blockDim.y + 2;
+
+    // fill shared tile (center + halo)
+    load_shared_for_tile(in, sdata, width, height, tx, ty, bx, by, sWidth, sHeight);
+
+    __syncthreads();
+
+    if (x >= width || y >= height) return;
+    const int kernel_x[3][3] = {
+        { -1,0,1 },
+        { -2,0,2 },
+        { -1,0,1 }
+    };
+    const int kernel_y[3][3] = { 
+        { 1,2,1 },
+        { 0,0,0 },
+        { -1,-2,-1 } 
+    };
+    for (int c = 0; c < CHANNELS; ++c) {
+        int sum_x = 0, sum_y = 0;
+        for (int oy = -1; oy <= 1; ++oy)
+            for (int ox = -1; ox <= 1; ++ox) {
+            int s_x = (tx + 1) + ox; 
+            int s_y = (ty + 1) + oy;
+            int value = sdata[(s_y * sWidth + s_x) * CHANNELS + c];
+            sum_x += kernel_x[oy+1][ox+1] * value;
+            sum_y += kernel_y[oy+1][ox+1] * value;
+        }
+        int mag = abs(sum_x) + abs(sum_y);
+        if (mag > 255) mag = 255;
+        out[(y * width + x) * CHANNELS + c] = (unsigned char)mag;
     }
 }
+
 
 int main()
 {
-    setlocale(LC_ALL, "Russian");
-    int device = 0;
-    dim3 blockSize(1024);
-    dim3 gridSize((N + blockSize.x - 1) / blockSize.x);
-    dtype* dev_arr;
-    dtype* arr = nullptr;
-    double err = 0.0;
-    cudaDeviceProp prop;
-    cudaError_t cuda_error;
+    using clock = std::chrono::high_resolution_clock;
+    auto total_start = clock::now();
 
-    cudaSetDevice(device);
+    const char* inPath = "input_small.png";
+    const char* outPath = "output.png";
+    const char* filter = "blur";
 
-    cuda_error = cudaGetDeviceProperties(&prop, device);
-    if (cuda_error != cudaSuccess) {
-        cout << "Ошибка получения свойств устройства: " << cudaGetErrorString(cuda_error) << endl;
-        return 1;
-    }
+	// чтение изображения
+    int width=0, height=0, channels=0;
+	// в image будет лежать массив пикселей, на каждый пиксель отводится channelsбайт, пикселей width*height
+	// формат пикселей  [RGB, RGB, RGB...], строки идут сверху вниз, первые 3 байта - цвет верхнего левого пикселя, вторые 3 байта - цвет второго пикселя в верхней строке 
+	// байты width*channels, width*channels+1, width*channels+2 - цвет первого пикселя второй строки и т.д.
+    unsigned char* image = stbi_load(inPath, &width, &height, &channels, 0);
+    if (!image) { std::cerr << "Failed to load " << inPath << std::endl; return 1; }
+    std::cout << "Loaded " << inPath << ": " << width << "x" << height << " channels=" << channels << std::endl;
 
-    cout << "Имя устройства: " << prop.name << endl;
-    cout << "Количество мультипроцессоров: " << prop.multiProcessorCount << endl;
-    cout << "Объем глобальной памяти: " << prop.totalGlobalMem << " байт" << endl;
-    cout << "Максимальное количество потоков на блок: " << prop.maxThreadsPerBlock << endl;
-    cout << "Максимальный размер сетки: " 
-         << prop.maxGridSize[0] << " x " << prop.maxGridSize[1] << " x " << prop.maxGridSize[2] << endl;
-    cout << "Максимальный размер блока: " 
-         << prop.maxThreadsDim[0] << " x " << prop.maxThreadsDim[1] << " x " << prop.maxThreadsDim[2] << endl;
+    size_t numBytes = (size_t)width * height * channels;
 
-    cudaMalloc((void**)&dev_arr, N * sizeof(dtype));
-    arr = (dtype*)malloc(N * sizeof(dtype));
-
-    // --- Время для init_arr_sin ---
-    cudaEvent_t start_sin, stop_sin;
-    cudaEventCreate(&start_sin);
-    cudaEventCreate(&stop_sin);
-    cudaEventRecord(start_sin, 0);
-
-    init_arr_sin<<<gridSize, blockSize>>>(dev_arr, N);
-    cudaEventRecord(stop_sin, 0);
-    cudaEventSynchronize(stop_sin);
-
-    float ms_sin = 0.0f;
-    cudaEventElapsedTime(&ms_sin, start_sin, stop_sin);
-
-    cudaMemcpy(arr, dev_arr, N * sizeof(dtype), cudaMemcpyDeviceToHost);
-    err = 0.0;
-    for (size_t i = 0; i < N; ++i) {
-        dtype expected = sin((i % 360) * PI / (dtype)180.0);
-        err += fabs(expected - arr[i]);
-    }
-    err /= N;
-    cout << "sin err = " << std::setprecision(10) << std::scientific << err << endl;
-    cout << "Время выполнения init_arr_sin: " << ms_sin << " мс" << endl;
-
-    cudaEventDestroy(start_sin);
-    cudaEventDestroy(stop_sin);
-
-    // --- Время для init_arr_sinf ---
-    cudaEvent_t start_sinf, stop_sinf;
-    cudaEventCreate(&start_sinf);
-    cudaEventCreate(&stop_sinf);
-    cudaEventRecord(start_sinf, 0);
-
-    init_arr_sinf<<<gridSize, blockSize>>>(dev_arr, N);
-    cudaEventRecord(stop_sinf, 0);
-    cudaEventSynchronize(stop_sinf);
-
-    float ms_sinf = 0.0f;
-    cudaEventElapsedTime(&ms_sinf, start_sinf, stop_sinf);
-
-    cudaMemcpy(arr, dev_arr, N * sizeof(dtype), cudaMemcpyDeviceToHost);
-    err = 0.0;
-    for (size_t i = 0; i < N; ++i) {
-        dtype expected = sin((i % 360) * PI / (dtype)180.0);
-        err += fabs(expected - arr[i]);
-    }
-    err /= N;
-    cout << "sinf err = " << std::setprecision(10) << std::scientific << err << endl;
-    cout << "Время выполнения init_arr_sinf: " << ms_sinf << " мс" << endl;
+	unsigned char* d_in = nullptr; // массив пикселей на устройстве для входного изображения
+	unsigned char* d_out = nullptr; // массив пикселей на устройстве для выходного изображения
     
-    cudaEventDestroy(start_sinf);
-    cudaEventDestroy(stop_sinf);
+	// выделение памяти на устройстве
+    cudaError_t err;
+    err = cudaMalloc((void**)&d_in, numBytes);
+    if (err != cudaSuccess) { std::cerr << "cudaMalloc in failed: " << cudaGetErrorString(err) << std::endl; stbi_image_free(image); return 1; }
+    err = cudaMalloc((void**)&d_out, numBytes);
+    if (err != cudaSuccess) { std::cerr << "cudaMalloc out failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in); stbi_image_free(image); return 1; }
 
-    // --- Время для init_arr_cuda__sinf ---
-    cudaEvent_t start_cuda_sinf, stop_cuda_sinf;
-    cudaEventCreate(&start_cuda_sinf);
-    cudaEventCreate(&stop_cuda_sinf);
-    cudaEventRecord(start_cuda_sinf, 0);
+    // размер блока 16x16 так как удобно для паралелизма (кратно 32) и достаточно по размеру для загрузки соседних пикселей в shared память
+    dim3 block(16,16); 
+    // размер сетки расчитывается исходя из размера изображения и размера блока (гарантируем покрытие всего изображения)
+    dim3 grid((width+block.x-1)/block.x, (height+block.y-1)/block.y);
 
-    init_arr_cuda__sinf<<<gridSize, blockSize>>>(dev_arr, N);
-    cudaEventRecord(stop_cuda_sinf, 0);
-    cudaEventSynchronize(stop_cuda_sinf);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    float kernel_ms=0.0f;
+    float h2d_ms=0.0f;
+    float d2h_ms=0.0f;
 
-    float ms_cuda_sinf = 0.0f;
-    cudaEventElapsedTime(&ms_cuda_sinf, start_cuda_sinf, stop_cuda_sinf);
+    size_t sharedBytes = (block.x + 2) * (block.y + 2) * channels; // shared memory по размеру на 2 пикселя больше блока в каждую сторону (для соседних пикселей)
+    
+    // копирование входного изображения на устройство
+    cudaEventRecord(start);
+    err = cudaMemcpy(d_in, image, numBytes, cudaMemcpyHostToDevice);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&h2d_ms, start, stop);
+    if (err != cudaSuccess) { std::cerr << "cudaMemcpy H2D failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); return 1; }
 
-    cudaMemcpy(arr, dev_arr, N * sizeof(dtype), cudaMemcpyDeviceToHost);
-    err = 0.0;
-    for (size_t i = 0; i < N; ++i) {
-        dtype expected = sin((i % 360) * PI / (dtype)180.0);
-        err += fabs(expected - arr[i]);
+	// запуск ядра в зависимости от выбранного фильтра
+    cudaEventRecord(start);
+    if (strcmp(filter, "blur")==0) {
+        blur_shared_kernel<<<grid, block, (unsigned int)sharedBytes>>>(d_in,d_out,width,height);
+    } else if (strcmp(filter, "sobel")==0) {
+        sobel_shared_kernel<<<grid, block, (unsigned int)sharedBytes>>>(d_in,d_out,width,height);
+    } else {
+        std::cerr << "Unknown filter " << filter << std::endl;
+        cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); return 1;
     }
-    err /= N;
-    cout << "__sinf err = " << std::setprecision(10) << std::scientific << err << endl;
-    cout << "Время выполнения init_arr_cuda__sinf: " << ms_cuda_sinf << " мс" << endl;
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&kernel_ms, start, stop);
+    
 
-    cudaEventDestroy(start_cuda_sinf);
-    cudaEventDestroy(stop_cuda_sinf);
+	// копирование результата на хост
+    unsigned char* outHost = (unsigned char*)malloc(numBytes);
+    cudaEventRecord(start);
+    err = cudaMemcpy(outHost, d_out, numBytes, cudaMemcpyDeviceToHost);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&d2h_ms, start, stop);
+    if (err != cudaSuccess) { std::cerr << "cudaMemcpy D2H failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); free(outHost); return 1; }
 
-    cudaFree(dev_arr);
-    free(arr);
+	// сохранение результата
+    int saved = stbi_write_png(outPath, width, height, channels, outHost, width * channels);
+    if (!saved) std::cerr << "Failed to write " << outPath << std::endl; else std::cout << "Saved " << outPath << std::endl;
+    
+	// освобождение памяти
+    cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); free(outHost);
+    cudaEventDestroy(start); cudaEventDestroy(stop);
+
+	// вывод времени выполнения
+    auto total_end = clock::now();
+    double total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
+    std::cout.setf(std::ios::scientific, std::ios::floatfield);
+    std::cout.precision(4);
+    std::cout << "Host-to-Device copy time (ms): " << h2d_ms << std::endl;
+    std::cout << "Kernel time (ms): " << kernel_ms << std::endl;
+    std::cout << "Device-to-Host copy time (ms): " << d2h_ms << std::endl;
+    std::cout << "Total time (ms): " << total_ms << std::endl;
+
     return 0;
 }

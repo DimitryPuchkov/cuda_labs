@@ -20,6 +20,7 @@ echo $SLURM_CPUS_PER_TASK
 echo $SLURM_NTASKS
 
 cd /home/mag/p_karitskaya
+rm lab3 output_*.png *.out *.err
 
 echo "=== Checking GPU availability ==="
 nvidia-smi

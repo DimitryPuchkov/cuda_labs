@@ -1,7 +1,7 @@
 ﻿
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-
+#include <cstring>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -239,8 +239,8 @@ int main(int argc, char* argv[])
     unsigned char* image2 = new unsigned char[image2Size];
 
     // разделение изображения на 2 части с учетом halo
-    std::memcpy(image1, image, image1Size);
-    std::memcpy(image2, image + image1Size - (size_t)width * 2 * channels, image2Size);
+    memcpy(image1, image, image1Size);
+    memcpy(image2, image + image1Size - (size_t)width * 2 * channels, image2Size);
 
     cudaDeviceSynchronize();
     cudaSetDevice(GPU1);
@@ -360,8 +360,8 @@ int main(int argc, char* argv[])
     unsigned char* outHost = (unsigned char*)malloc(numBytes);
     // объединение двух частей обратно в одно изображение
     // разделение изображения на 2 части с учетом halo
-    std::memcpy(outHost, outHost1, image1Size - width * channels);
-    std::memcpy(outHost + image1Size - width * channels, outHost2, image2Size - width * channels);
+    memcpy(outHost, outHost1, image1Size - width * channels);
+    memcpy(outHost + image1Size - width * channels, outHost2, image2Size - width * channels);
 
     // сохранение результата
     int saved = stbi_write_png(outPath, width, height, channels, outHost, width * channels);

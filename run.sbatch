@@ -30,7 +30,17 @@ nvcc -o lab3 kernel.cu
 if [ $? -eq 0 ]; then
     echo "Compilation successful!"
     echo "=== Running lab3 program ==="
-    ./lab3
+    echo "SMALL IMAGE: blur"
+    ./lab3 input_small.png output_small_blur.png blur
+
+    echo "SMALL IMAGE: sobel"
+    ./lab3 input_small.png output_small_sobel.png sobel
+
+    echo "BIG IMAGE: blur"
+    ./lab3 input.png output_blur.png blur
+
+    echo "BIG IMAGE: sobel"
+    ./lab3 input.png output_sobel.png sobel
 else
     echo "Compilation failed!"
     exit 1

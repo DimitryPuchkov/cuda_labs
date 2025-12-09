@@ -1,4 +1,5 @@
-﻿#include "cuda_runtime.h"
+﻿
+#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
 #include <stdio.h>
@@ -13,15 +14,19 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image.h"
 #include "stb_image_write.h"
+#define GPU1  0
+#define GPU2  1
 
 const int CHANNELS = 3;
+
+
 // Simple helper to clamp coordinates
 __device__ __host__ inline int clamp(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
 
 // helper: load center + halo into shared memory
-__device__ __forceinline__ void load_shared_for_tile(const unsigned char*  in, unsigned char*  sdata,
-                                                     int width, int height,
-                                                     int tx, int ty, int bx, int by, int sWidth, int sHeight)
+__device__ __forceinline__ void load_shared_for_tile(const unsigned char* in, unsigned char* sdata,
+    int width, int height,
+    int tx, int ty, int bx, int by, int sWidth, int sHeight)
 {
     int x = bx + tx;
     int y = by + ty;
@@ -111,7 +116,7 @@ __device__ __forceinline__ void load_shared_for_tile(const unsigned char*  in, u
 
 // Shared-memory 3x3 processing kernel (modified to use helper)
 
-__global__ void blur_shared_kernel(const unsigned char*  in, unsigned char*  out, int width, int height)
+__global__ void blur_shared_kernel(const unsigned char* in, unsigned char* out, int width, int height)
 {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -154,7 +159,7 @@ __global__ void blur_shared_kernel(const unsigned char*  in, unsigned char*  out
 }
 
 // Shared Sobel
-__global__ void sobel_shared_kernel(const unsigned char*  in, unsigned char*  out, int width, int height)
+__global__ void sobel_shared_kernel(const unsigned char* in, unsigned char* out, int width, int height)
 {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -179,21 +184,21 @@ __global__ void sobel_shared_kernel(const unsigned char*  in, unsigned char*  ou
         { -2,0,2 },
         { -1,0,1 }
     };
-    const int kernel_y[3][3] = { 
+    const int kernel_y[3][3] = {
         { 1,2,1 },
         { 0,0,0 },
-        { -1,-2,-1 } 
+        { -1,-2,-1 }
     };
     for (int c = 0; c < CHANNELS; ++c) {
         int sum_x = 0, sum_y = 0;
         for (int oy = -1; oy <= 1; ++oy)
             for (int ox = -1; ox <= 1; ++ox) {
-            int s_x = (tx + 1) + ox; 
-            int s_y = (ty + 1) + oy;
-            int value = sdata[(s_y * sWidth + s_x) * CHANNELS + c];
-            sum_x += kernel_x[oy+1][ox+1] * value;
-            sum_y += kernel_y[oy+1][ox+1] * value;
-        }
+                int s_x = (tx + 1) + ox;
+                int s_y = (ty + 1) + oy;
+                int value = sdata[(s_y * sWidth + s_x) * CHANNELS + c];
+                sum_x += kernel_x[oy + 1][ox + 1] * value;
+                sum_y += kernel_y[oy + 1][ox + 1] * value;
+            }
         int mag = abs(sum_x) + abs(sum_y);
         if (mag > 255) mag = 255;
         out[(y * width + x) * CHANNELS + c] = (unsigned char)mag;
@@ -201,98 +206,188 @@ __global__ void sobel_shared_kernel(const unsigned char*  in, unsigned char*  ou
 }
 
 
-int main()
+int main(int argc, char* argv[])
 {
     using clock = std::chrono::high_resolution_clock;
     auto total_start = clock::now();
 
-    const char* inPath = "input_small.png";
-    const char* outPath = "output.png";
-    const char* filter = "blur";
+    const char* inPath = argv[1];
+    const char* outPath = argv[2];
+    const char* filter = argv[3];
 
-	// чтение изображения
-    int width=0, height=0, channels=0;
-	// в image будет лежать массив пикселей, на каждый пиксель отводится channelsбайт, пикселей width*height
-	// формат пикселей  [RGB, RGB, RGB...], строки идут сверху вниз, первые 3 байта - цвет верхнего левого пикселя, вторые 3 байта - цвет второго пикселя в верхней строке 
-	// байты width*channels, width*channels+1, width*channels+2 - цвет первого пикселя второй строки и т.д.
+    // чтение изображения
+    int width = 0, height = 0, channels = 0;
+    // в image будет лежать массив пикселей, на каждый пиксель отводится channelsбайт, пикселей width*height
+    // формат пикселей  [RGB, RGB, RGB...], строки идут сверху вниз, первые 3 байта - цвет верхнего левого пикселя, вторые 3 байта - цвет второго пикселя в верхней строке 
+    // байты width*channels, width*channels+1, width*channels+2 - цвет первого пикселя второй строки и т.д.
     unsigned char* image = stbi_load(inPath, &width, &height, &channels, 0);
     if (!image) { std::cerr << "Failed to load " << inPath << std::endl; return 1; }
     std::cout << "Loaded " << inPath << ": " << width << "x" << height << " channels=" << channels << std::endl;
 
     size_t numBytes = (size_t)width * height * channels;
+    size_t image1Size, image2Size;
+    if (height % 2 == 0) {
+        image1Size = (size_t)(width * (height / 2 + 1)) * channels; // + 1 для halo 
+        image2Size = (size_t)(width * (height / 2 + 1)) * channels; // + 1 для halo 
+    }
+    else {
+        image1Size = (size_t)(width * (height / 2 + 2)) * channels; // + 1 для halo и +1 для нечетной строки
+        image2Size = (size_t)(width * (height / 2 + 1)) * channels; // + 1 для halo 
+    }
 
-	unsigned char* d_in = nullptr; // массив пикселей на устройстве для входного изображения
-	unsigned char* d_out = nullptr; // массив пикселей на устройстве для выходного изображения
-    
-	// выделение памяти на устройстве
+    unsigned char* image1 = new unsigned char[image1Size];
+    unsigned char* image2 = new unsigned char[image2Size];
+
+    // разделение изображения на 2 части с учетом halo
+    std::memcpy(image1, image, image1Size);
+    std::memcpy(image2, image + image1Size - (size_t)width * 2 * channels, image2Size);
+
+    cudaDeviceSynchronize();
+    cudaSetDevice(GPU1);
+    unsigned char* d_in1 = nullptr; // массив пикселей на устройстве для входного изображения на 1 девайсе
+    unsigned char* d_out1 = nullptr; // массив пикселей на устройстве для выходного изображения на 1 девайсе
+    // выделение памяти на устройстве
     cudaError_t err;
-    err = cudaMalloc((void**)&d_in, numBytes);
+    err = cudaMalloc((void**)&d_in1, image1Size);
     if (err != cudaSuccess) { std::cerr << "cudaMalloc in failed: " << cudaGetErrorString(err) << std::endl; stbi_image_free(image); return 1; }
-    err = cudaMalloc((void**)&d_out, numBytes);
-    if (err != cudaSuccess) { std::cerr << "cudaMalloc out failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in); stbi_image_free(image); return 1; }
+    err = cudaMalloc((void**)&d_out1, image2Size);
+    if (err != cudaSuccess) { std::cerr << "cudaMalloc out failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in1); stbi_image_free(image); return 1; }
+
+
+    cudaSetDevice(GPU2);
+    unsigned char* d_in2 = nullptr; // массив пикселей на устройстве для входного изображения на 2 девайсе
+    unsigned char* d_out2 = nullptr; // массив пикселей на устройстве для выходного изображения на 2 девайсе
+    // выделение памяти на устройстве
+    err = cudaMalloc((void**)&d_in2, image2Size);
+    if (err != cudaSuccess) { std::cerr << "cudaMalloc in failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in1); cudaFree(d_out1); stbi_image_free(image); return 1; }
+    err = cudaMalloc((void**)&d_out2, image2Size);
+    if (err != cudaSuccess) { std::cerr << "cudaMalloc out failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in1); cudaFree(d_out1); cudaFree(d_in2); stbi_image_free(image); return 1; }
 
     // размер блока 16x16 так как удобно для паралелизма (кратно 32) и достаточно по размеру для загрузки соседних пикселей в shared память
-    dim3 block(16,16); 
+    dim3 block(16, 16);
     // размер сетки расчитывается исходя из размера изображения и размера блока (гарантируем покрытие всего изображения)
-    dim3 grid((width+block.x-1)/block.x, (height+block.y-1)/block.y);
-
+    dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
+    size_t sharedBytes = (block.x + 2) * (block.y + 2) * channels; // shared memory по размеру на 2 пикселя больше блока в каждую сторону (для соседних пикселей)
     cudaEvent_t start, stop;
+
+    cudaSetDevice(GPU1);
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-    float kernel_ms=0.0f;
-    float h2d_ms=0.0f;
-    float d2h_ms=0.0f;
+    float kernel_ms1 = 0.0f;
+    float h2d_ms1 = 0.0f;
+    float d2h_ms1 = 0.0f;
 
-    size_t sharedBytes = (block.x + 2) * (block.y + 2) * channels; // shared memory по размеру на 2 пикселя больше блока в каждую сторону (для соседних пикселей)
-    
+
+
     // копирование входного изображения на устройство
     cudaEventRecord(start);
-    err = cudaMemcpy(d_in, image, numBytes, cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_in1, image1, image1Size, cudaMemcpyHostToDevice);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&h2d_ms, start, stop);
-    if (err != cudaSuccess) { std::cerr << "cudaMemcpy H2D failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); return 1; }
+    cudaEventElapsedTime(&h2d_ms1, start, stop);
+    if (err != cudaSuccess) { std::cerr << "cudaMemcpy H2D failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in1); cudaFree(d_out1); stbi_image_free(image); return 1; }
 
-	// запуск ядра в зависимости от выбранного фильтра
+    // запуск ядра в зависимости от выбранного фильтра
     cudaEventRecord(start);
-    if (strcmp(filter, "blur")==0) {
-        blur_shared_kernel<<<grid, block, (unsigned int)sharedBytes>>>(d_in,d_out,width,height);
-    } else if (strcmp(filter, "sobel")==0) {
-        sobel_shared_kernel<<<grid, block, (unsigned int)sharedBytes>>>(d_in,d_out,width,height);
-    } else {
+    if (strcmp(filter, "blur") == 0) {
+        blur_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, height);
+    }
+    else if (strcmp(filter, "sobel") == 0) {
+        sobel_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, height);
+    }
+    else {
         std::cerr << "Unknown filter " << filter << std::endl;
-        cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); return 1;
+        cudaFree(d_in1); cudaFree(d_out1); stbi_image_free(image); return 1;
     }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&kernel_ms, start, stop);
-    
+    cudaEventElapsedTime(&kernel_ms1, start, stop);
 
-	// копирование результата на хост
-    unsigned char* outHost = (unsigned char*)malloc(numBytes);
+    // копирование результата на хост
+    unsigned char* outHost1 = (unsigned char*)malloc((size_t)(image1Size - width * channels));
     cudaEventRecord(start);
-    err = cudaMemcpy(outHost, d_out, numBytes, cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(outHost1, d_out1, (size_t)(image1Size - width * channels), cudaMemcpyDeviceToHost);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&d2h_ms, start, stop);
-    if (err != cudaSuccess) { std::cerr << "cudaMemcpy D2H failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); free(outHost); return 1; }
+    cudaEventElapsedTime(&d2h_ms1, start, stop);
+    if (err != cudaSuccess) { std::cerr << "cudaMemcpy D2H failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in1); cudaFree(d_out1); stbi_image_free(image); free(outHost1); return 1; }
 
-	// сохранение результата
+
+
+    cudaSetDevice(GPU2);
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    float kernel_ms2 = 0.0f;
+    float h2d_ms2 = 0.0f;
+    float d2h_ms2 = 0.0f;
+
+
+
+    // копирование входного изображения на устройство
+    cudaEventRecord(start);
+    err = cudaMemcpy(d_in2, image2, image2Size, cudaMemcpyHostToDevice);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&h2d_ms2, start, stop);
+    if (err != cudaSuccess) { std::cerr << "cudaMemcpy H2D failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in2); cudaFree(d_out2); stbi_image_free(image); return 1; }
+
+    // запуск ядра в зависимости от выбранного фильтра
+    cudaEventRecord(start);
+    if (strcmp(filter, "blur") == 0) {
+        blur_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, height);
+    }
+    else if (strcmp(filter, "sobel") == 0) {
+        sobel_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, height);
+    }
+    else {
+        std::cerr << "Unknown filter " << filter << std::endl;
+        cudaFree(d_in2); cudaFree(d_out1); stbi_image_free(image); return 1;
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&kernel_ms2, start, stop);
+
+    // копирование результата на хост
+    unsigned char* outHost2 = (unsigned char*)malloc((size_t)(image2Size - width * channels));
+    cudaEventRecord(start);
+    err = cudaMemcpy(outHost2, d_out2, (size_t)(image2Size - width * channels), cudaMemcpyDeviceToHost);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&d2h_ms2, start, stop);
+    if (err != cudaSuccess) { std::cerr << "cudaMemcpy D2H failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in2); cudaFree(d_out2); stbi_image_free(image); free(outHost2); return 1; }
+
+
+    unsigned char* outHost = (unsigned char*)malloc(numBytes);
+    // объединение двух частей обратно в одно изображение
+    // разделение изображения на 2 части с учетом halo
+    std::memcpy(outHost, outHost1, image1Size - width * channels);
+    std::memcpy(outHost + image1Size - width * channels, outHost2, image2Size - width * channels);
+
+    // сохранение результата
     int saved = stbi_write_png(outPath, width, height, channels, outHost, width * channels);
     if (!saved) std::cerr << "Failed to write " << outPath << std::endl; else std::cout << "Saved " << outPath << std::endl;
-    
-	// освобождение памяти
-    cudaFree(d_in); cudaFree(d_out); stbi_image_free(image); free(outHost);
+
+    // освобождение памяти
+    cudaSetDevice(GPU1);
+    cudaFree(d_in1); cudaFree(d_out1);
+    cudaSetDevice(GPU2);
+    cudaFree(d_in2); cudaFree(d_out2);
+    stbi_image_free(image); free(outHost);
     cudaEventDestroy(start); cudaEventDestroy(stop);
 
-	// вывод времени выполнения
+    // вывод времени выполнения
     auto total_end = clock::now();
     double total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
     std::cout.setf(std::ios::scientific, std::ios::floatfield);
     std::cout.precision(4);
-    std::cout << "Host-to-Device copy time (ms): " << h2d_ms << std::endl;
-    std::cout << "Kernel time (ms): " << kernel_ms << std::endl;
-    std::cout << "Device-to-Host copy time (ms): " << d2h_ms << std::endl;
+    std::cout << "1)Host-to-Device copy time (ms): " << h2d_ms1 << std::endl;
+    std::cout << "1)Kernel time (ms): " << kernel_ms1 << std::endl;
+    std::cout << "1)Device-to-Host copy time (ms): " << d2h_ms1 << std::endl;
+
+    std::cout << "2)Host-to-Device copy time (ms): " << h2d_ms2 << std::endl;
+    std::cout << "2)Kernel time (ms): " << kernel_ms2 << std::endl;
+    std::cout << "2)Device-to-Host copy time (ms): " << d2h_ms2 << std::endl;
+
     std::cout << "Total time (ms): " << total_ms << std::endl;
 
     return 0;

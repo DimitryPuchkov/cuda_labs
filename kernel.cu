@@ -304,6 +304,7 @@ int main(int argc, char* argv[])
     cudaEventElapsedTime(&kernel_ms1, start, stop);
 
     // копирование результата на хост
+    cudaDeviceSynchronize();
     unsigned char* outHost1 = (unsigned char*)malloc((size_t)(image1Size - width * channels));
     cudaEventRecord(start);
     err = cudaMemcpy(outHost1, d_out1, (size_t)(image1Size - width * channels), cudaMemcpyDeviceToHost);
@@ -348,6 +349,7 @@ int main(int argc, char* argv[])
     cudaEventElapsedTime(&kernel_ms2, start, stop);
 
     // копирование результата на хост
+    cudaDeviceSynchronize();
     unsigned char* outHost2 = (unsigned char*)malloc((size_t)(image2Size - width * channels));
     cudaEventRecord(start);
     err = cudaMemcpy(outHost2, d_out2, (size_t)(image2Size - width * channels), cudaMemcpyDeviceToHost);

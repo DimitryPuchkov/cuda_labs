@@ -225,16 +225,18 @@ int main(int argc, char* argv[])
     std::cout << "Loaded " << inPath << ": " << width << "x" << height << " channels=" << channels << std::endl;
 
     size_t numBytes = (size_t)width * height * channels;
-    size_t image1Size, image2Size;
-    if (height % 2 == 0) {
-        image1Size = (size_t)(width * (height / 2 + 1)) * channels; // + 1 для halo 
-        image2Size = (size_t)(width * (height / 2 + 1)) * channels; // + 1 для halo 
-    }
-    else {
-        image1Size = (size_t)(width * (height / 2 + 2)) * channels; // + 1 для halo и +1 для нечетной строки
-        image2Size = (size_t)(width * (height / 2 + 1)) * channels; // + 1 для halo 
-    }
+    // Разделяем изображение на две части с перекрытием (halo)
+    int half_height = height / 2;
+    int overlap = 1; // Для фильтра 3x3 нужен 1 пиксель перекрытия
 
+    // Размеры частей с учетом перекрытия
+    int part1_height = half_height + overlap;
+    int part2_height = height - half_height + overlap;
+
+    size_t image1Size = (size_t)width * part1_height * channels;
+    size_t image2Size = (size_t)width * part2_height * channels;
+
+    // Выделяем память для частей
     unsigned char* image1 = new unsigned char[image1Size];
     unsigned char* image2 = new unsigned char[image2Size];
 
@@ -250,7 +252,7 @@ int main(int argc, char* argv[])
     cudaError_t err;
     err = cudaMalloc((void**)&d_in1, image1Size);
     if (err != cudaSuccess) { std::cerr << "cudaMalloc in failed: " << cudaGetErrorString(err) << std::endl; stbi_image_free(image); return 1; }
-    err = cudaMalloc((void**)&d_out1, image2Size);
+    err = cudaMalloc((void**)&d_out1, image1Size);
     if (err != cudaSuccess) { std::cerr << "cudaMalloc out failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in1); stbi_image_free(image); return 1; }
 
 
@@ -265,8 +267,7 @@ int main(int argc, char* argv[])
 
     // размер блока 16x16 так как удобно для паралелизма (кратно 32) и достаточно по размеру для загрузки соседних пикселей в shared память
     dim3 block(16, 16);
-    // размер сетки расчитывается исходя из размера изображения и размера блока (гарантируем покрытие всего изображения)
-    dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
+    
     size_t sharedBytes = (block.x + 2) * (block.y + 2) * channels; // shared memory по размеру на 2 пикселя больше блока в каждую сторону (для соседних пикселей)
     cudaEvent_t start, stop;
 
@@ -284,16 +285,18 @@ int main(int argc, char* argv[])
     err = cudaMemcpy(d_in1, image1, image1Size, cudaMemcpyHostToDevice);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
+    // размер сетки расчитывается исходя из размера изображения и размера блока (гарантируем покрытие всего изображения)
+    dim3 grid1((width + block.x - 1) / block.x, (part1_height + block.y - 1) / block.y);
     cudaEventElapsedTime(&h2d_ms1, start, stop);
     if (err != cudaSuccess) { std::cerr << "cudaMemcpy H2D failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in1); cudaFree(d_out1); stbi_image_free(image); return 1; }
 
     // запуск ядра в зависимости от выбранного фильтра
     cudaEventRecord(start);
     if (strcmp(filter, "blur") == 0) {
-        blur_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, height);
+        blur_shared_kernel << <grid1, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, part1_height);
     }
     else if (strcmp(filter, "sobel") == 0) {
-        sobel_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, height);
+        sobel_shared_kernel << <grid1, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, part1_height);
     }
     else {
         std::cerr << "Unknown filter " << filter << std::endl;
@@ -305,9 +308,9 @@ int main(int argc, char* argv[])
 
     // копирование результата на хост
     cudaDeviceSynchronize();
-    unsigned char* outHost1 = (unsigned char*)malloc((size_t)(image1Size - width * channels));
+    unsigned char* outHost1 = new unsigned char[image1Size];
     cudaEventRecord(start);
-    err = cudaMemcpy(outHost1, d_out1, (size_t)(image1Size - width * channels), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(outHost1, d_out1, (size_t)width * half_height * channels, cudaMemcpyDeviceToHost);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&d2h_ms1, start, stop);
@@ -332,13 +335,15 @@ int main(int argc, char* argv[])
     cudaEventElapsedTime(&h2d_ms2, start, stop);
     if (err != cudaSuccess) { std::cerr << "cudaMemcpy H2D failed: " << cudaGetErrorString(err) << std::endl; cudaFree(d_in2); cudaFree(d_out2); stbi_image_free(image); return 1; }
 
+
     // запуск ядра в зависимости от выбранного фильтра
+    dim3 grid2((width + block.x - 1) / block.x, (part2_height + block.y - 1) / block.y);
     cudaEventRecord(start);
     if (strcmp(filter, "blur") == 0) {
-        blur_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, height);
+        blur_shared_kernel << <grid2, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, part2_height);
     }
     else if (strcmp(filter, "sobel") == 0) {
-        sobel_shared_kernel << <grid, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, height);
+        sobel_shared_kernel << <grid2, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, part2_height);
     }
     else {
         std::cerr << "Unknown filter " << filter << std::endl;
@@ -350,9 +355,9 @@ int main(int argc, char* argv[])
 
     // копирование результата на хост
     cudaDeviceSynchronize();
-    unsigned char* outHost2 = (unsigned char*)malloc((size_t)(image2Size - width * channels));
+    unsigned char* outHost2 = new unsigned char[image2Size];
     cudaEventRecord(start);
-    err = cudaMemcpy(outHost2, d_out2, (size_t)(image2Size - width * channels), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(outHost2, d_out2, (size_t)width * (height - half_height) * channels, cudaMemcpyDeviceToHost);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&d2h_ms2, start, stop);

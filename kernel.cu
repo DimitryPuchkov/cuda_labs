@@ -214,7 +214,7 @@ int main(int argc, char* argv[])
     const char* inPath = argv[1];
     const char* outPath = argv[2];
     const char* filter = argv[3];
-
+    cudaStream_t s0, s1;
     // чтение изображения
     int width = 0, height = 0, channels = 0;
     // в image будет лежать массив пикселей, на каждый пиксель отводится channelsбайт, пикселей width*height
@@ -244,8 +244,9 @@ int main(int argc, char* argv[])
     memcpy(image1, image, image1Size);
     memcpy(image2, image + image1Size - (size_t)width * 2 * channels, image2Size);
 
-    cudaDeviceSynchronize();
+    //cudaDeviceSynchronize();
     cudaSetDevice(GPU1);
+    
     unsigned char* d_in1 = nullptr; // массив пикселей на устройстве для входного изображения на 1 девайсе
     unsigned char* d_out1 = nullptr; // массив пикселей на устройстве для выходного изображения на 1 девайсе
     // выделение памяти на устройстве
@@ -272,6 +273,7 @@ int main(int argc, char* argv[])
     cudaEvent_t start, stop;
 
     cudaSetDevice(GPU1);
+    cudaStreamCreate(&s0);
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     float kernel_ms1 = 0.0f;
@@ -282,7 +284,7 @@ int main(int argc, char* argv[])
 
     // копирование входного изображения на устройство
     cudaEventRecord(start);
-    err = cudaMemcpy(d_in1, image1, image1Size, cudaMemcpyHostToDevice);
+    err = cudaMemcpyAsync(d_in1, image1, image1Size, cudaMemcpyHostToDevice, s0);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     // размер сетки расчитывается исходя из размера изображения и размера блока (гарантируем покрытие всего изображения)
@@ -293,10 +295,10 @@ int main(int argc, char* argv[])
     // запуск ядра в зависимости от выбранного фильтра
     cudaEventRecord(start);
     if (strcmp(filter, "blur") == 0) {
-        blur_shared_kernel << <grid1, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, part1_height);
+        blur_shared_kernel << <grid1, block, (unsigned int)sharedBytes, s0>> > (d_in1, d_out1, width, part1_height);
     }
     else if (strcmp(filter, "sobel") == 0) {
-        sobel_shared_kernel << <grid1, block, (unsigned int)sharedBytes >> > (d_in1, d_out1, width, part1_height);
+        sobel_shared_kernel << <grid1, block, (unsigned int)sharedBytes, s0>> > (d_in1, d_out1, width, part1_height);
     }
     else {
         std::cerr << "Unknown filter " << filter << std::endl;
@@ -307,10 +309,10 @@ int main(int argc, char* argv[])
     cudaEventElapsedTime(&kernel_ms1, start, stop);
 
     // копирование результата на хост
-    cudaDeviceSynchronize();
+    //cudaDeviceSynchronize();
     unsigned char* outHost1 = new unsigned char[image1Size];
     cudaEventRecord(start);
-    err = cudaMemcpy(outHost1, d_out1, (size_t)width * half_height * channels, cudaMemcpyDeviceToHost);
+    err = cudaMemcpyAsync(outHost1, d_out1, (size_t)width * half_height * channels, cudaMemcpyDeviceToHost, s0);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&d2h_ms1, start, stop);
@@ -319,6 +321,7 @@ int main(int argc, char* argv[])
 
 
     cudaSetDevice(GPU2);
+    cudaStreamCreate(&s1);
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     float kernel_ms2 = 0.0f;
@@ -329,7 +332,7 @@ int main(int argc, char* argv[])
 
     // копирование входного изображения на устройство
     cudaEventRecord(start);
-    err = cudaMemcpy(d_in2, image2, image2Size, cudaMemcpyHostToDevice);
+    err = cudaMemcpyAsync(d_in2, image2, image2Size, cudaMemcpyHostToDevice, s1);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&h2d_ms2, start, stop);
@@ -340,10 +343,10 @@ int main(int argc, char* argv[])
     dim3 grid2((width + block.x - 1) / block.x, (part2_height + block.y - 1) / block.y);
     cudaEventRecord(start);
     if (strcmp(filter, "blur") == 0) {
-        blur_shared_kernel << <grid2, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, part2_height);
+        blur_shared_kernel << <grid2, block, (unsigned int)sharedBytes, s1 >> > (d_in2, d_out2, width, part2_height);
     }
     else if (strcmp(filter, "sobel") == 0) {
-        sobel_shared_kernel << <grid2, block, (unsigned int)sharedBytes >> > (d_in2, d_out2, width, part2_height);
+        sobel_shared_kernel << <grid2, block, (unsigned int)sharedBytes, s1 >> > (d_in2, d_out2, width, part2_height);
     }
     else {
         std::cerr << "Unknown filter " << filter << std::endl;
@@ -354,10 +357,10 @@ int main(int argc, char* argv[])
     cudaEventElapsedTime(&kernel_ms2, start, stop);
 
     // копирование результата на хост
-    cudaDeviceSynchronize();
+    //cudaDeviceSynchronize();
     unsigned char* outHost2 = new unsigned char[image2Size];
     cudaEventRecord(start);
-    err = cudaMemcpy(outHost2, d_out2, (size_t)width * (height - half_height) * channels, cudaMemcpyDeviceToHost);
+    err = cudaMemcpyAsync(outHost2, d_out2, (size_t)width * (height - half_height) * channels, cudaMemcpyDeviceToHost, s1);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&d2h_ms2, start, stop);
